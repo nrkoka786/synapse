@@ -1,14 +1,15 @@
 # Synapse Configuration
-# Copy this to ~/.synapse/config.toml and edit as needed
+# Copy this to ~/.synapse/config.toml and edit as needed.
+# All settings are optional — Synapse works out of the box with no config file.
 
 [synapse]
-# Folders to watch and index (use forward slashes or double backslashes on Windows)
+# Folders to watch and index (forward slashes on all platforms)
 watch_paths = [
     "C:/Users/YourName/Projects/myapp",
     "C:/Users/YourName/Projects/anotherproject",
 ]
 
-# File patterns to ignore (supports glob syntax)
+# File patterns to ignore (glob syntax)
 ignore_patterns = [
     "*.pyc",
     "__pycache__",
@@ -26,16 +27,53 @@ ignore_patterns = [
     "package-lock.json",
 ]
 
-[embedding]
-# "local"  → uses sentence-transformers (free, private, ~400MB model download on first run)
-# "openai" → uses OpenAI API (requires OPENAI_API_KEY env var, better quality)
-provider = "local"
+# ── Embedding providers ───────────────────────────────────────────────────────
+#
+# Choose the provider that fits your workflow.
+# All providers output 768-dim vectors and work with the same local index.
+# If you switch providers, run `synapse wipe` then `synapse init` to re-index.
+#
+# ┌─────────────┬──────────────────────────┬──────────────┬──────────────────┐
+# │ provider    │ install                  │ key required │ notes            │
+# ├─────────────┼──────────────────────────┼──────────────┼──────────────────┤
+# │ local       │ pip install synapse-mcp  │ none         │ default, private │
+# │ ollama      │ (none extra)             │ none         │ run ollama serve │
+# │ openai      │ pip install .[openai]    │ OPENAI_API_KEY│ best quality    │
+# │ gemini      │ pip install .[gemini]    │ GEMINI_API_KEY│ free 1500/day   │
+# │ cohere      │ pip install .[cohere]    │ COHERE_API_KEY│ free tier       │
+# └─────────────┴──────────────────────────┴──────────────┴──────────────────┘
 
-# Local model (only used if provider = "local")
+[embedding]
+# ── Option 1: Local (default) ─────────────────────────────────────────────────
+# Uses nomic-embed-text-v1.5 via sentence-transformers.
+# Downloads ~400MB on first run. Entirely private. No API key.
+provider = "local"
 model = "nomic-ai/nomic-embed-text-v1.5"
 
-# Chunk size in tokens (smaller = more precise retrieval, larger = more context per result)
-chunk_size = 512
+# ── Option 2: Ollama ──────────────────────────────────────────────────────────
+# Requires Ollama installed and running: https://ollama.com/download
+# Pull the model first: ollama pull nomic-embed-text
+# provider = "ollama"
+# model = "nomic-embed-text"          # any model you've pulled locally
+# ollama_url = "http://localhost:11434"  # change if Ollama runs on another host
 
-# Overlap between consecutive chunks (helps preserve context at chunk boundaries)
-chunk_overlap = 64
+# ── Option 3: OpenAI ──────────────────────────────────────────────────────────
+# Requires: pip install synapse-mcp[openai]  +  OPENAI_API_KEY env var
+# provider = "openai"
+# model = "text-embedding-3-small"    # cost: ~$0.00 for personal use
+
+# ── Option 4: Google Gemini ───────────────────────────────────────────────────
+# Requires: pip install synapse-mcp[gemini]  +  GEMINI_API_KEY env var
+# Free key at: https://aistudio.google.com/app/apikey  (1,500 requests/day free)
+# provider = "gemini"
+# model = "text-embedding-004"
+
+# ── Option 5: Cohere ──────────────────────────────────────────────────────────
+# Requires: pip install synapse-mcp[cohere]  +  COHERE_API_KEY env var
+# Free key at: https://dashboard.cohere.com/api-keys
+# provider = "cohere"
+# model = "embed-english-v3.0"        # use embed-multilingual-v3.0 for non-English
+
+# ── Chunking (applies to all providers) ──────────────────────────────────────
+# chunk_size = 512       # approximate tokens per chunk
+# chunk_overlap = 64     # token overlap between consecutive chunks

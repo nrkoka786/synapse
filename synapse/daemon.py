@@ -20,17 +20,70 @@ from synapse.store.vectordb import VectorDB, make_chunk_record
 logger = logging.getLogger(__name__)
 
 
-# ── Embedder resolver ─────────────────────────────────────────────────────────
+# ── Supported embedding providers ────────────────────────────────────────────
+#
+#   provider      package             key required        notes
+#   ──────────    ─────────────────   ─────────────────   ──────────────────────
+#   local         sentence-tfmrs      none                default, ~400MB DL
+#   openai        openai              OPENAI_API_KEY      text-embedding-3-small
+#   ollama        (built-in urllib)   none                needs Ollama running
+#   gemini        google-genai        GEMINI_API_KEY      text-embedding-004
+#   cohere        cohere              COHERE_API_KEY      embed-english-v3.0
+#
+# Set [embedding] provider = "<name>" in ~/.synapse/config.toml
+
+
+_PROVIDERS = {
+    "local": "synapse.embedding.local",
+    "openai": "synapse.embedding.openai_emb",
+    "ollama": "synapse.embedding.ollama",
+    "gemini": "synapse.embedding.gemini",
+    "cohere": "synapse.embedding.cohere",
+}
+
 
 def _get_encoder():
-    """Return (encode_batch, encode_query) functions based on config."""
+    """
+    Return (encode_batch, encode_query) functions for the configured provider.
+
+    encode_batch(texts: list[str]) -> list[list[float]]
+    encode_query(query: str)       -> list[float]
+    """
     cfg = get_embedding_config()
-    provider = cfg.get("provider", "local")
-    if provider == "openai":
-        from synapse.embedding.openai_emb import encode, encode_query
-    else:
-        from synapse.embedding.local import encode, encode_query
-    return encode, encode_query
+    provider = cfg.get("provider", "local").lower().strip()
+
+    module_path = _PROVIDERS.get(provider)
+    if module_path is None:
+        supported = ", ".join(f'"{p}"' for p in _PROVIDERS)
+        raise ValueError(
+            f"Unknown embedding provider: '{provider}'.\n"
+            f"Supported providers: {supported}\n"
+            f"Set [embedding] provider in ~/.synapse/config.toml"
+        )
+
+    import importlib
+    try:
+        module = importlib.import_module(module_path)
+    except ImportError as exc:
+        _provider_install_hint(provider, exc)
+
+    return module.encode, module.encode_query
+
+
+def _provider_install_hint(provider: str, exc: ImportError) -> None:
+    """Raise a user-friendly error with the install command for a provider."""
+    hints = {
+        "openai": "pip install synapse-mcp[openai]  or  pip install openai",
+        "ollama": "No extra install needed — start Ollama: https://ollama.com/download",
+        "gemini": "pip install synapse-mcp[gemini]  or  pip install google-genai",
+        "cohere": "pip install synapse-mcp[cohere]  or  pip install cohere",
+    }
+    hint = hints.get(provider, f"pip install synapse-mcp[{provider}]")
+    raise ImportError(
+        f"Embedding provider '{provider}' requires an additional package.\n"
+        f"Install with: {hint}\n"
+        f"Original error: {exc}"
+    ) from exc
 
 
 # ── Core indexing logic ───────────────────────────────────────────────────────
@@ -76,14 +129,12 @@ def index_file(
     if not chunks:
         return None
 
-    # Embed all chunks in one batch call
     try:
         embeddings = encode_batch([c.content for c in chunks])
     except Exception as exc:
         logger.error(f"Embedding error for {path}: {exc}")
         return None
 
-    # Remove stale chunks for this file, then insert fresh ones
     file_path_str = str(path)
     vectordb.delete_file(file_path_str)
 
@@ -99,7 +150,6 @@ def index_file(
     ]
     vectordb.upsert_chunks(records)
 
-    # Update metadata
     content_hash = hash_file(path)
     metadata.upsert_file(
         file_path=file_path_str,
@@ -180,9 +230,7 @@ def index_paths(
         if progress_callback:
             progress_callback(file_path, status)
 
-    # Rebuild ANN index if warranted
     vectordb.rebuild_index()
-
     return stats
 
 

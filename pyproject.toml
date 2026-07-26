@@ -4,13 +4,13 @@ build-backend = "hatchling.build"
 
 [project]
 name = "synapse-mcp"
-version = "0.1.0"
-description = "Give Claude instant knowledge of your codebase — local, private, no cloud"
+version = "0.2.0"
+description = "Give any AI instant knowledge of your codebase — local, private, no cloud"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
 authors = [{ name = "NR", email = "nrkoka@gmail.com" }]
-keywords = ["mcp", "claude", "ai", "context", "codebase", "developer-tools"]
+keywords = ["mcp", "claude", "cursor", "ai", "context", "codebase", "developer-tools", "ollama", "gemini", "openai", "cohere"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
@@ -21,25 +21,62 @@ classifiers = [
     "Topic :: Software Development :: Libraries :: Python Modules",
 ]
 
+# Core dependencies — always installed.
+# Embedding provider packages are optional (see below).
 dependencies = [
     "click>=8.1.0",
     "fastmcp>=2.0.0",
     "lancedb>=0.8.0",
-    "sentence-transformers>=3.0.0",
     "watchdog>=4.0.0",
     "tomli-w>=1.0.0",
     "rich>=13.0.0",
     "pyarrow>=14.0.0",
-    "openai>=1.0.0",
-    "torch>=2.0.0",
 ]
 
 [project.optional-dependencies]
+
+# Local embeddings (default) — free, private, ~400 MB model download on first run.
+# Included in the `default` extra so `pip install synapse-mcp` works out of the box.
+local = [
+    "sentence-transformers>=3.0.0",
+    "torch>=2.0.0",
+]
+
+# OpenAI embeddings — text-embedding-3-small, 768-dim.
+# Requires OPENAI_API_KEY env var.
+openai = [
+    "openai>=1.0.0",
+]
+
+# Ollama embeddings — any locally-pulled model (recommended: nomic-embed-text).
+# No API key. Requires Ollama running: https://ollama.com/download
+# No extra Python packages needed — uses stdlib urllib.
+ollama = []
+
+# Google Gemini embeddings — text-embedding-004, 768-dim.
+# Requires GEMINI_API_KEY env var. Free tier: 1,500 requests/day.
+gemini = [
+    "google-genai>=1.0.0",
+]
+
+# Cohere embeddings — embed-english-v3.0, truncated to 768-dim.
+# Requires COHERE_API_KEY env var. Generous free tier.
+cohere = [
+    "cohere>=5.0.0",
+]
+
+# Install everything (for contributors / power users)
+all = [
+    "synapse-mcp[local,openai,gemini,cohere]",
+]
+
+# Development tools
 dev = [
     "pytest>=7.0.0",
     "pytest-asyncio>=0.21.0",
     "pytest-cov>=4.0.0",
     "ruff>=0.1.0",
+    "synapse-mcp[all]",
 ]
 
 [project.scripts]
@@ -50,6 +87,7 @@ synapse-mcp = "synapse.mcp.server:run"
 Homepage = "https://github.com/nrkoka786/synapse"
 Repository = "https://github.com/nrkoka786/synapse"
 Issues = "https://github.com/nrkoka786/synapse/issues"
+Changelog = "https://github.com/nrkoka786/synapse/releases"
 
 [tool.hatch.build.targets.wheel]
 packages = ["synapse"]
