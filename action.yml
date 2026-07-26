@@ -1,0 +1,124 @@
+# Synapse GitHub Action
+# Indexes your repository and posts a retrieval quality report to PRs.
+#
+# Usage in your repo (.github/workflows/synapse.yml):
+#
+#   - uses: nrkoka786/synapse@v0.3
+#     with:
+#       path: '.'
+#       post-comment: true
+
+name: 'Synapse — Codebase Context Health'
+description: 'Index your codebase with Synapse and report retrieval quality on every PR'
+author: 'NR'
+
+branding:
+  icon: 'cpu'
+  color: 'blue'
+
+inputs:
+  path:
+    description: 'Path to index (relative to repo root)'
+    required: false
+    default: '.'
+  embedding-provider:
+    description: 'Embedding provider: local | openai | gemini | cohere | ollama'
+    required: false
+    default: 'local'
+  post-comment:
+    description: 'Post benchmark results as a PR comment'
+    required: false
+    default: 'true'
+  fail-below:
+    description: 'Fail the action if Synapse score falls below this value (0–100, 0 = never fail)'
+    required: false
+    default: '0'
+
+outputs:
+  score:
+    description: 'Synapse benchmark score (0–100)'
+    value: ${{ steps.benchmark.outputs.score }}
+  hit-rate:
+    description: 'Query hit rate percentage'
+    value: ${{ steps.benchmark.outputs.hit_rate }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+
+    - name: Install Synapse
+      shell: bash
+      run: |
+        pip install synapse-mcp --quiet
+        echo "✓ synapse-mcp installed"
+
+    - name: Index repository
+      shell: bash
+      run: |
+        echo "Indexing ${{ inputs.path }}..."
+        synapse init "${{ inputs.path }}" --force
+        synapse status
+
+    - name: Run benchmark
+      id: benchmark
+      shell: bash
+      run: |
+        synapse benchmark --output synapse-report.json
+        SCORE=$(python -c "import json; d=json.load(open('synapse-report.json')); print(d['overall_score'])")
+        HIT_RATE=$(python -c "import json; d=json.load(open('synapse-report.json')); print(d['hit_rate_pct'])")
+        echo "score=$SCORE" >> $GITHUB_OUTPUT
+        echo "hit_rate=$HIT_RATE" >> $GITHUB_OUTPUT
+        echo "Synapse score: $SCORE / 100 (hit rate: $HIT_RATE%)"
+
+    - name: Post PR comment
+      if: inputs.post-comment == 'true' && github.event_name == 'pull_request'
+      uses: actions/github-script@v7
+      with:
+        script: |
+          const fs = require('fs');
+          const report = JSON.parse(fs.readFileSync('synapse-report.json', 'utf8'));
+          const score = report.overall_score;
+          const hitRate = report.hit_rate_pct;
+          const emoji = score >= 60 ? '✅' : score >= 35 ? '⚠️' : '❌';
+          const rows = report.queries.map(q => {
+            const s = q.top_score.toFixed(2);
+            const color = q.hits > 0 ? '🟢' : '🔴';
+            return `| ${color} | ${q.query} | ${q.hits}/${q.total} | ${s} | ${q.top_file} | ${q.latency_ms.toFixed(0)}ms |`;
+          }).join('\n');
+          const body = `## ${emoji} Synapse Context Health — Score: **${score}/100**
+
+          > **${hitRate}%** of queries found relevant code · **${report.avg_latency_ms.toFixed(0)}ms** avg latency · **${report.indexed_files}** files indexed
+
+          <details>
+          <summary>Query breakdown</summary>
+
+          | | Query | Hits | Top Score | Best Match | Latency |
+          |---|---|---|---|---|---|
+          ${rows}
+
+          </details>
+
+          _Powered by [Synapse](https://github.com/nrkoka786/synapse) — give any AI instant knowledge of your codebase_`;
+
+          github.rest.issues.createComment({
+            issue_number: context.issue.number,
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            body: body,
+          });
+
+    - name: Check score threshold
+      if: inputs.fail-below != '0'
+      shell: bash
+      run: |
+        SCORE=${{ steps.benchmark.outputs.score }}
+        THRESHOLD=${{ inputs.fail-below }}
+        if (( $(echo "$SCORE < $THRESHOLD" | bc -l) )); then
+          echo "❌ Synapse score ($SCORE) is below threshold ($THRESHOLD)"
+          exit 1
+        fi
+        echo "✓ Score $SCORE >= threshold $THRESHOLD"

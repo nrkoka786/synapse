@@ -1,0 +1,23 @@
+{
+  "name": "synapse-mcp",
+  "version": "0.3.0",
+  "description": "Give any AI instant knowledge of your codebase — local, private, no cloud",
+  "keywords": ["mcp", "claude", "cursor", "ai", "codebase", "developer-tools", "context"],
+  "homepage": "https://github.com/nrkoka786/synapse",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/nrkoka786/synapse.git"
+  },
+  "license": "MIT",
+  "author": "NR",
+  "bin": {
+    "synapse-mcp": "./bin/synapse-mcp.js",
+    "synapse": "./bin/synapse.js"
+  },
+  "scripts": {
+    "test": "node bin/synapse-mcp.js --version"
+  },
+  "engines": {
+    "node": ">=16.0.0"
+  }
+}

@@ -1,11 +1,13 @@
 """
 Synapse CLI — all commands a user will type.
 
-  synapse init <path>    Add a folder and index it
-  synapse start          Start MCP server + file watcher
-  synapse status         Show index statistics
-  synapse search <query> Search the index from the terminal
-  synapse wipe           Delete the entire local index
+  synapse init <path>        Add a folder and index it
+  synapse start              Start MCP server + file watcher
+  synapse status             Show index statistics
+  synapse search <query>     Search the index from the terminal
+  synapse explain <file>     Show what Synapse knows about a file
+  synapse benchmark          Measure retrieval quality
+  synapse wipe               Delete the entire local index
 """
 
 from __future__ import annotations
@@ -20,6 +22,7 @@ from pathlib import Path
 
 import click
 from rich.console import Console
+from rich.panel import Panel
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn
 from rich.table import Table
 from rich import print as rprint
@@ -44,12 +47,13 @@ console = Console()
 @click.group()
 @click.version_option(__version__, prog_name="synapse")
 def main():
-    """Synapse — Give Claude instant knowledge of your codebase.\n
+    """Synapse — Give any AI instant knowledge of your codebase.\n
     \b
     Quick start:
       synapse init C:/Projects/myapp
-      (restart Claude Desktop)
-      Done — Claude now knows your codebase.
+      claude mcp add synapse synapse-mcp
+      (restart your AI tool)
+      Done — it now knows your codebase.
     """
     pass
 
@@ -63,22 +67,18 @@ def init(path: str, force: bool):
     """
     Add PATH to Synapse and index it immediately.
 
-    After running this command, update your Claude Desktop config
-    to include the synapse-mcp server. Synapse will print the exact
-    config snippet to copy.
+    After running this command, register Synapse with your AI tool:
+      claude mcp add synapse synapse-mcp
     """
     folder = Path(path).resolve()
     console.print(f"\n[bold cyan]Synapse v{__version__}[/bold cyan]")
     console.print(f"Initializing: [green]{folder}[/green]\n")
 
-    # 1. Save to config
     add_watch_path(str(folder))
     console.print("✓ Added to watch list")
 
-    # 2. Index the folder
     metadata = MetadataStore()
     vectordb = VectorDB()
-
     ignore_patterns = get_ignore_patterns()
 
     from synapse.ingestion.reader import is_supported, should_ignore
@@ -95,24 +95,18 @@ def init(path: str, force: bool):
         console.print("Supported types: .py .ts .js .go .rs .md .json .yaml and more.")
         return
 
-    from synapse.daemon import index_file
+    from synapse.daemon import index_file, _get_encoder
     from synapse.config import get_embedding_config
-    from synapse.embedding.local import encode as local_encode
-    from synapse.embedding.openai_emb import encode as openai_encode
 
     cfg = get_embedding_config()
     provider = cfg.get("provider", "local")
-
     console.print(f"✓ Embedding provider: [bold]{provider}[/bold]")
     if provider == "local":
         console.print("  (First run downloads ~400MB model — please wait…)")
 
-    encode_batch = openai_encode if provider == "openai" else local_encode
+    encode_batch, _ = _get_encoder()
 
-    indexed = 0
-    skipped = 0
-    errors = 0
-    total_chunks = 0
+    indexed = skipped = errors = total_chunks = 0
 
     with Progress(
         SpinnerColumn(),
@@ -141,24 +135,15 @@ def init(path: str, force: bool):
                   f"[bold]{total_chunks}[/bold] chunks · "
                   f"{skipped} skipped · {errors} errors")
 
-    # Rebuild ANN index
     vectordb.rebuild_index()
-
-    # 3. Print Claude Desktop config snippet
-    _print_claude_config_instructions()
+    _print_mcp_instructions()
 
 
 # ── start ─────────────────────────────────────────────────────────────────────
 
 @main.command()
 def start():
-    """
-    Start the Synapse MCP server and file watcher.
-
-    NOTE: Claude Desktop launches synapse-mcp automatically as a subprocess
-    via the MCP config. You only need to run `synapse start` manually if you
-    want to test the server or use a custom MCP client.
-    """
+    """Start the Synapse MCP server and file watcher (manual mode)."""
     watch_paths = get_watch_paths()
     if not watch_paths:
         console.print("[red]No watch paths configured.[/red]")
@@ -182,9 +167,7 @@ def start():
         ignore_patterns=get_ignore_patterns(),
     )
 
-    # Also start MCP server in a background thread
     mcp_thread = threading.Thread(target=_run_mcp_server, daemon=True)
-
     watcher.start()
     mcp_thread.start()
 
@@ -215,16 +198,14 @@ def status():
 
     console.print(f"\n[bold cyan]Synapse v{__version__} — Status[/bold cyan]\n")
 
-    # Watch paths
     if watch_paths:
         console.print("[bold]Watching:[/bold]")
         for p in watch_paths:
-            exists = "✓" if p.exists() else "[red]✗ (not found)[/red]"
+            exists = "✓" if Path(p).exists() else "[red]✗ (not found)[/red]"
             console.print(f"  {exists} {p}")
     else:
         console.print("[yellow]No watch paths configured. Run: synapse init <path>[/yellow]")
 
-    # Index stats
     file_count = stats.get("file_count") or 0
     total_chunks = stats.get("total_chunks") or 0
     total_bytes = stats.get("total_bytes") or 0
@@ -241,7 +222,6 @@ def status():
         dt = datetime.datetime.fromtimestamp(last_indexed)
         console.print(f"  Last indexed:   {dt.strftime('%Y-%m-%d %H:%M:%S')}")
 
-    # Config
     cfg = load_config()
     emb = cfg.get("embedding", {})
     console.print(f"\n[bold]Config:[/bold]")
@@ -289,10 +269,248 @@ def search(query: str, limit: int):
         console.print(f"[bold cyan]{'─' * 70}[/bold cyan]")
         console.print(f"[bold]{i}. {Path(file_path).name}[/bold]{score_str} [dim]{file_path}[/dim]")
         console.print(f"[dim]Language: {language}[/dim]\n")
-        # Show first 500 chars
         preview = content[:500] + ("…" if len(content) > 500 else "")
         console.print(preview)
         console.print()
+
+
+# ── explain ───────────────────────────────────────────────────────────────────
+
+@main.command()
+@click.argument("file_path")
+@click.option("--related", "-r", default=5, show_default=True,
+              help="Number of related files to show.")
+def explain(file_path: str, related: int):
+    """Show what Synapse knows about a file — its role, structure, and related files.\n
+    \b
+    Examples:
+      synapse explain src/api/client.ts
+      synapse explain payment.py
+      synapse explain "C:/Projects/myapp/src/auth.ts"
+    """
+    import re
+    from synapse.daemon import get_file_context, search as daemon_search
+    from synapse.store.metadata import MetadataStore
+
+    vectordb = VectorDB()
+    metadata = MetadataStore()
+
+    # ── Resolve the file in the index ─────────────────────────────────────────
+    target = Path(file_path)
+    all_files = metadata.get_all_files() if hasattr(metadata, "get_all_files") else []
+
+    # Try exact match first, then filename match
+    matched_path = None
+    if target.is_absolute() and target.exists():
+        matched_path = str(target.resolve())
+    else:
+        # Match by filename or partial path
+        needle = target.name.lower()
+        candidates = [
+            f["file_path"] for f in all_files
+            if Path(f["file_path"]).name.lower() == needle
+               or str(f["file_path"]).replace("\\", "/").lower().endswith(
+                   str(target).replace("\\", "/").lower()
+               )
+        ]
+        if candidates:
+            matched_path = candidates[0]
+
+    console.print()
+
+    if not matched_path:
+        console.print(f"[red]File not found in Synapse index:[/red] {file_path}\n")
+        console.print("Tips:")
+        console.print("  • Run [bold]synapse status[/bold] to see what's indexed")
+        console.print("  • Use just the filename: [bold]synapse explain client.ts[/bold]")
+        console.print("  • Run [bold]synapse init <path>[/bold] to index a new folder")
+        sys.exit(1)
+
+    # ── Load chunks ───────────────────────────────────────────────────────────
+    chunks = vectordb.get_by_file(matched_path)
+    if not chunks:
+        console.print(f"[yellow]No chunks found for {matched_path}[/yellow]")
+        sys.exit(1)
+
+    full_content = "\n\n".join(c["content"] for c in chunks)
+    language = chunks[0].get("language", "unknown")
+    file_meta = next((f for f in all_files if f["file_path"] == matched_path), {})
+    file_size = file_meta.get("file_size", 0)
+    chunk_count = len(chunks)
+
+    # ── Extract structure (functions / classes) ───────────────────────────────
+    structure = _extract_structure(full_content, language)
+
+    # ── Find related files via semantic search ─────────────────────────────────
+    fname = Path(matched_path).stem.replace("_", " ").replace("-", " ")
+    search_query = f"{fname} {language}"
+    try:
+        raw_related = daemon_search(search_query, vectordb, limit=related + 1)
+        related_files = []
+        seen = set()
+        for r in raw_related:
+            rp = r.get("file_path", "")
+            if rp == matched_path or rp in seen:
+                continue
+            seen.add(rp)
+            score = max(0.0, 1.0 - r.get("_distance", 1.0))
+            related_files.append((Path(rp).name, rp, score))
+            if len(related_files) >= related:
+                break
+    except Exception:
+        related_files = []
+
+    # ── Render ────────────────────────────────────────────────────────────────
+    display_name = Path(matched_path).name
+
+    console.print(Panel(
+        f"[bold white]{display_name}[/bold white]",
+        title="[bold cyan]Synapse — File Explanation[/bold cyan]",
+        border_style="cyan",
+    ))
+
+    # Metadata row
+    console.print(f"\n[bold]File:[/bold]     {matched_path}")
+    console.print(f"[bold]Language:[/bold] {language}")
+    console.print(f"[bold]Size:[/bold]     {_human_bytes(file_size)}  ·  {chunk_count} chunk{'s' if chunk_count != 1 else ''} indexed")
+
+    # Structure
+    if structure:
+        console.print(f"\n[bold]Structure[/bold] ({len(structure)} items):")
+        for kind, name in structure[:20]:
+            icon = "🔷" if kind == "class" else "🔹"
+            console.print(f"  {icon} {kind:8s}  {name}")
+        if len(structure) > 20:
+            console.print(f"  [dim]… and {len(structure) - 20} more[/dim]")
+    else:
+        console.print("\n[dim]No functions or classes detected.[/dim]")
+
+    # Related files
+    if related_files:
+        console.print(f"\n[bold]Related files:[/bold]")
+        for fname_short, fpath, score in related_files:
+            bar = "█" * int(score * 10)
+            console.print(f"  {score:.2f} {bar:10s}  {fname_short}  [dim]{fpath}[/dim]")
+    else:
+        console.print("\n[dim]No related files found.[/dim]")
+
+    # Content preview
+    console.print(f"\n[bold]Content preview:[/bold]")
+    preview_lines = full_content.splitlines()[:30]
+    console.print("\n".join(preview_lines))
+    if len(full_content.splitlines()) > 30:
+        console.print(f"[dim]… ({len(full_content.splitlines())} total lines indexed)[/dim]")
+
+    console.print()
+
+
+# ── benchmark ─────────────────────────────────────────────────────────────────
+
+@main.command()
+@click.option("--queries", "-q", default=None, metavar="FILE",
+              help="JSON file with custom query list (array of strings).")
+@click.option("--output", "-o", default=None, metavar="FILE",
+              help="Save report to a JSON file.")
+@click.option("--limit", "-n", default=5, show_default=True,
+              help="Results to retrieve per query.")
+def benchmark(queries: str | None, output: str | None, limit: int):
+    """Measure Synapse retrieval quality and get a shareable score.\n
+    \b
+    Runs a set of preset queries against your index and scores how well
+    Synapse retrieves relevant code. Share the results to show Synapse works.
+
+    Examples:
+      synapse benchmark
+      synapse benchmark --queries my_queries.json
+      synapse benchmark --output results.json
+    """
+    from synapse.benchmark import run_benchmark, load_custom_queries, PRESET_QUERIES
+
+    # Load queries
+    custom_queries = None
+    if queries:
+        try:
+            custom_queries = load_custom_queries(queries)
+            console.print(f"[dim]Loaded {len(custom_queries)} custom queries from {queries}[/dim]")
+        except Exception as exc:
+            console.print(f"[red]Error loading query file: {exc}[/red]")
+            sys.exit(1)
+
+    query_list = custom_queries or PRESET_QUERIES
+    console.print(f"\n[bold cyan]Synapse Benchmark[/bold cyan] — {len(query_list)} queries\n")
+
+    # Run with progress
+    report = None
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        TaskProgressColumn(),
+        console=console,
+    ) as progress:
+        task = progress.add_task("Running queries…", total=len(query_list))
+
+        # Patch progress into benchmark (simple approach: run and update after)
+        from synapse.benchmark import run_benchmark as _run
+        report = _run(custom_queries=custom_queries, limit=limit)
+        progress.update(task, completed=len(query_list))
+
+    # ── Results table ─────────────────────────────────────────────────────────
+    table = Table(show_header=True, header_style="bold cyan", box=None, padding=(0, 1))
+    table.add_column("Query", style="white", max_width=40)
+    table.add_column("Hits", justify="center", width=5)
+    table.add_column("Top Score", justify="right", width=10)
+    table.add_column("Latency", justify="right", width=10)
+    table.add_column("Best Match", style="dim", max_width=30)
+
+    for r in report.results:
+        score_color = "green" if r.top_score >= 0.5 else "yellow" if r.top_score >= 0.3 else "red"
+        hit_str = f"[green]{r.hits}/{r.total}[/green]" if r.hits > 0 else f"[red]{r.hits}/{r.total}[/red]"
+        table.add_row(
+            r.query[:40],
+            hit_str,
+            f"[{score_color}]{r.top_score:.2f}[/{score_color}]",
+            f"{r.latency_ms:.0f}ms",
+            r.top_file[:30],
+        )
+
+    console.print(table)
+
+    # ── Summary ───────────────────────────────────────────────────────────────
+    score_color = "green" if report.overall_score >= 60 else "yellow" if report.overall_score >= 35 else "red"
+    hit_pct = round(report.queries_with_hits / report.total_queries * 100) if report.total_queries else 0
+
+    console.print(f"\n{'─' * 60}")
+    console.print(f"  [bold]Synapse Score:[/bold]  [{score_color}][bold]{report.overall_score}/100[/bold][/{score_color}]")
+    console.print(f"  Hit rate:        {hit_pct}%  ({report.queries_with_hits}/{report.total_queries} queries found results)")
+    console.print(f"  Avg relevance:   {report.avg_top_score:.2f}")
+    console.print(f"  Avg latency:     {report.avg_latency_ms:.0f}ms")
+    console.print(f"  Index:           {report.indexed_files:,} files · {report.indexed_chunks:,} chunks")
+    console.print(f"  Provider:        {report.provider}")
+    console.print(f"{'─' * 60}\n")
+
+    if report.overall_score >= 60:
+        console.print("[bold green]✓ Synapse is retrieving relevant code reliably.[/bold green]")
+    elif report.overall_score >= 35:
+        console.print("[yellow]⚠ Retrieval is partial. Try re-indexing: synapse wipe && synapse init <path>[/yellow]")
+    else:
+        console.print("[red]✗ Low retrieval quality. Check that your project is fully indexed.[/red]")
+        console.print("  Run: [bold]synapse status[/bold]")
+
+    # Shareable one-liner
+    console.print(
+        f"\n[dim]Shareable result: "
+        f"Synapse scored {report.overall_score}/100 on {report.total_queries} queries "
+        f"({hit_pct}% hit rate, {report.avg_latency_ms:.0f}ms avg) "
+        f"— github.com/nrkoka786/synapse[/dim]"
+    )
+
+    # Save to file if requested
+    if output:
+        _save_report(report, output)
+        console.print(f"\n✓ Report saved to [green]{output}[/green]")
+
+    console.print()
 
 
 # ── wipe ─────────────────────────────────────────────────────────────────────
@@ -312,41 +530,81 @@ def wipe():
 # ── Internal helpers ──────────────────────────────────────────────────────────
 
 def _run_mcp_server():
-    """Run the MCP server (called in a daemon thread from `synapse start`)."""
     from synapse.mcp.server import run
     run()
 
 
-def _print_claude_config_instructions():
-    """Print the Claude Desktop MCP config snippet for Windows."""
-    config_path = claude_desktop_config_path()
-
-    # Build the MCP server entry
-    mcp_entry = {
-        "synapse": {
-            "command": "synapse-mcp",
-            "args": []
-        }
-    }
-
+def _print_mcp_instructions():
     console.print("\n" + "─" * 60)
-    console.print("[bold]Next step: connect Synapse to Claude Desktop[/bold]\n")
-    console.print(f"Open this file:")
-    console.print(f"  [green]{config_path}[/green]\n")
-    console.print('Add this to the [bold]"mcpServers"[/bold] section:\n')
+    console.print("[bold]Next: connect Synapse to your AI tool[/bold]\n")
+    console.print("[bold]Claude Code:[/bold]")
+    console.print("  claude mcp add synapse synapse-mcp\n")
+    console.print("[bold]Cursor / Continue / Windsurf[/bold] — add to MCP config:")
+    mcp_entry = {"mcpServers": {"synapse": {"command": "synapse-mcp", "args": []}}}
     console.print(json.dumps(mcp_entry, indent=2))
-    console.print(
-        "\nIf the file doesn't exist yet, create it with:\n"
-        '{\n'
-        '  "mcpServers": ' + json.dumps(mcp_entry, indent=4) + '\n'
-        '}'
-    )
-    console.print("\n[bold green]Then restart Claude Desktop.[/bold green]")
-    console.print("That's it — Synapse is connected. ✓\n")
+    console.print("\n[bold green]Then restart your AI tool. Done. ✓[/bold green]\n")
+
+
+def _extract_structure(content: str, language: str) -> list[tuple[str, str]]:
+    """Extract function and class names from indexed content using simple regex."""
+    import re
+    patterns = {
+        "python":     [(r"^class\s+(\w+)", "class"), (r"^(?:async )?def\s+(\w+)", "function")],
+        "typescript": [(r"^(?:export\s+)?class\s+(\w+)", "class"),
+                       (r"^(?:export\s+)?(?:async\s+)?function\s+(\w+)", "function"),
+                       (r"^(?:export\s+)?(?:const|let)\s+(\w+)\s*=\s*(?:async\s*)?\(", "function")],
+        "javascript": [(r"^(?:export\s+)?class\s+(\w+)", "class"),
+                       (r"^(?:export\s+)?(?:async\s+)?function\s+(\w+)", "function")],
+        "go":         [(r"^func\s+(?:\(\w+\s+\*?\w+\)\s+)?(\w+)", "function"),
+                       (r"^type\s+(\w+)\s+struct", "class")],
+        "rust":       [(r"^(?:pub\s+)?fn\s+(\w+)", "function"),
+                       (r"^(?:pub\s+)?struct\s+(\w+)", "class")],
+        "java":       [(r"^(?:public|private|protected)?\s*class\s+(\w+)", "class"),
+                       (r"^(?:public|private|protected)[\w\s]*\s+(\w+)\s*\(", "function")],
+    }
+    rules = patterns.get(language, [])
+    found = []
+    seen = set()
+    for line in content.splitlines():
+        line = line.strip()
+        for pattern, kind in rules:
+            m = re.match(pattern, line)
+            if m:
+                name = m.group(1)
+                if name not in seen:
+                    seen.add(name)
+                    found.append((kind, name))
+    return found
+
+
+def _save_report(report, path: str):
+    """Save benchmark report as JSON."""
+    import dataclasses
+    data = {
+        "overall_score": report.overall_score,
+        "hit_rate_pct": round(report.queries_with_hits / report.total_queries * 100),
+        "avg_top_score": report.avg_top_score,
+        "avg_latency_ms": report.avg_latency_ms,
+        "indexed_files": report.indexed_files,
+        "indexed_chunks": report.indexed_chunks,
+        "provider": report.provider,
+        "queries": [
+            {
+                "query": r.query,
+                "hits": r.hits,
+                "total": r.total,
+                "top_score": r.top_score,
+                "avg_score": r.avg_score,
+                "latency_ms": r.latency_ms,
+                "top_file": r.top_file,
+            }
+            for r in report.results
+        ],
+    }
+    Path(path).write_text(json.dumps(data, indent=2), encoding="utf-8")
 
 
 def _human_bytes(n: int) -> str:
-    """Convert bytes to human-readable string."""
     if n < 1024:
         return f"{n} B"
     elif n < 1024 ** 2:

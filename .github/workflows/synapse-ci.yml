@@ -1,0 +1,27 @@
+# Synapse self-hosted CI — indexes its own codebase and benchmarks on every PR.
+# Also serves as a live example of the synapse-action.
+
+name: Synapse Context Health
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  context-health:
+    name: Index & Benchmark
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run Synapse
+        uses: nrkoka786/synapse@v0.3
+        with:
+          path: '.'
+          embedding-provider: 'local'
+          post-comment: ${{ github.event_name == 'pull_request' }}
+          fail-below: '0'
